@@ -1,0 +1,721 @@
+//Mapping includes
+#include "Arduino.h"
+#include <Motor.h>
+#include <stdlib.h>
+#include <ros.h>
+#include <geometry_msgs/Twist.h>
+#include <std_msgs/String.h>
+#include <ros/time.h>
+#include <sensor_msgs/Range.h>
+#include <tf/transform_broadcaster.h>
+#define USE_USBCON
+
+
+#define AIN1 5
+#define AIN2 4
+#define BIN1 7
+#define BIN2 8
+#define PWMA 6
+#define PWMB 9
+
+
+int flag = 0;
+ros::NodeHandle  nh;
+float move1;
+float move2;
+sensor_msgs::Range range_msg;
+geometry_msgs::Twist msg;
+void callback(const geometry_msgs::Twist& cmd_vel)
+{
+  move1 = cmd_vel.linear.x;
+  move2 = cmd_vel.angular.z;
+  if (move1 > 0 && move2 == 0)
+  {
+	flag = 1;
+	front();
+	delay(10);
+  }
+  else if (move1 > 0 && move2 > 0 )
+  {
+	flag = 2;
+	left();
+	delay(10);
+  }
+  else if (move1 > 0 && move2 < 0 )
+  {
+	flag = 3;
+	right();
+	delay(1);
+  }
+  else if (move1 < 0)
+  {
+	flag = 4;
+	back();
+	delay(1);
+  }
+  else
+  {
+	flag = 5;
+	die();
+  }
+}
+ros::Subscriber <geometry_msgs::Twist> sub("/cmd_vel", callback);
+
+
+
+Motor motor1; //create motor class 2 set pwm individually
+Motor motor2;
+
+//Encoder myEnc(18, 19); //create encoder left
+//Encoder myEnc2(21, 20); //createencoder right
+
+//variables for encoder
+double samplingTime = 0.1;
+long rotationsA = 0;
+long rotationsB = 0;
+long rotations_1A = 0;
+long rotations_2A = 0;
+long totalPosition = 0;
+long newPosition = 0;
+long newPosition2 = 0;
+//variables for PID
+unsigned long lastTime = 0;
+unsigned long currentTime = 0;
+long oldPosition = -999;
+long oldPosition2 = -999;
+
+
+//flags
+bool goFlag = true;
+int dir = 1;
+int avoid1 = 0;
+int avoid2 = 0;
+int x = 0;
+int a = 0;
+int y = 0;
+boolean complete = false;
+int count1 = 0;
+int count2 = 0;
+
+//homeBase variables
+//int interrupt = 2; //start the robot assuming it's staying at home base
+int interrupt = 0;
+int LED = LED_BUILTIN; // Use the onboard UNO LED
+
+//ultrasonic range sensor pins
+int obstaclePin[5] = {  A2,  A4,  A7,  A0,  A12}; //R1,R2,Right,Left,Front
+	int trigPin[5] = {  A3,  A5,  A6,  A1,  A11}; //R1,R2,Right,Left,Front
+int rearObst[2] = { A4,  15};
+int rearTrig[2] = {  A3,  14};
+//int LED[2]= {2,3}; //Hook up two LED Pins to detect obstacles
+int isObstacleThere[5] = {  0,  0,  0,  0,  0}; //0 is either HIGH or LOW obstacle
+int isWallThere[2] = {  0,  0};
+long duration[5], cm[5];
+long durationRear[2], cmRear[2];
+
+
+void setup() {
+  // put your setup code here, to run once:
+  nh.initNode();
+  nh.subscribe(sub);
+  //decleare pins to be used for motor 1 and 2
+  motor1.setdriverPins (4,5,6);
+  motor2.setdriverPins (7,8,9);
+ 
+  for (int i = 0; i < 5; i++) {
+	pinMode(obstaclePin[i], INPUT);
+	pinMode(trigPin[i], OUTPUT);
+  }
+  for (int j = 0; j<2; j++) {
+	pinMode(rearObst[j], INPUT);
+	pinMode(rearTrig[j], OUTPUT);
+  }
+   pinMode(PWMA,OUTPUT);
+   pinMode(PWMB,OUTPUT);
+    
+   pinMode(AIN1,OUTPUT);
+   pinMode(AIN2,OUTPUT);
+   pinMode(BIN1,OUTPUT);
+   pinMode(BIN2,OUTPUT);
+  //Serial.begin(9600);
+}
+ros::Time begin = nh.now();
+
+
+
+void loop() {
+  //readRear();
+  //Serial.println("START");  
+  while (interrupt != 0) {
+	homeBase();
+  }//end while
+	nh.now();
+  nh.spinOnce();
+	delay(10);
+
+} //end loop
+
+
+
+//METHODS//
+
+/////////////////////////////////Autonomous Methods///////////////////////////////
+void front()
+{
+	analogWrite(PWMA, 200);
+	analogWrite(PWMB, 200);// motor speed
+	digitalWrite(AIN1, HIGH);
+	digitalWrite(BIN1, HIGH);
+	digitalWrite(AIN2, LOW);
+	digitalWrite(BIN2, LOW);
+	delay(600);
+	die();
+    
+}
+void backA()
+{
+	analogWrite(PWMA, 200);
+	analogWrite(PWMB, 200);
+	digitalWrite(AIN1, LOW);
+	digitalWrite(BIN1, LOW);
+	digitalWrite(AIN2, HIGH);
+	digitalWrite(BIN2, HIGH);
+	delay(600);
+	die();   
+}
+void left()
+{
+	analogWrite(PWMA, 200);
+	analogWrite(PWMB, 200);
+	digitalWrite(AIN1, LOW);
+	digitalWrite(BIN1, HIGH);
+	digitalWrite(AIN2, LOW);
+	digitalWrite(BIN2, LOW);
+	delay(600);
+	die();
+
+}
+void right()
+{
+	analogWrite(PWMA, 200);
+	analogWrite(PWMB, 200);
+	digitalWrite(AIN1, HIGH);
+	digitalWrite(BIN1, LOW);
+	digitalWrite(AIN2, LOW);
+	digitalWrite(BIN2, LOW);
+	delay(600);
+	die();
+}
+void die()
+{
+	analogWrite(PWMA, 0);
+	analogWrite(PWMB, 0);
+	digitalWrite(AIN1, LOW);
+	digitalWrite(BIN1, LOW);
+	digitalWrite(AIN2, LOW);
+	digitalWrite(BIN2, LOW);
+}
+
+
+
+/////////////////////////////////////go straight/////////////////////////////////
+void gogo() { //go
+ analogWrite(PWMA, 255);
+ analogWrite(PWMB, 255);// motor speed
+ digitalWrite(LED_BUILTIN, HIGH);
+ digitalWrite(AIN1,HIGH);// FORWARD MOTOR 1(right)
+ digitalWrite(AIN2,LOW);// FORWARD MOTOR 1 (right)
+ digitalWrite(BIN1,HIGH);// FORWARD MOTOR 2
+ digitalWrite(BIN2,LOW);// FORWARD MOTOR 2
+}
+
+///////////////////////////////////STAY///////////////////////////////////////
+void staystay() { //stop
+ digitalWrite(AIN1,LOW);// STOP MOTOR 1 (right)
+ digitalWrite(AIN2,LOW);
+ digitalWrite(BIN1,LOW);// STOP MOTOR 2
+ digitalWrite(BIN2,LOW);//
+ digitalWrite(LED_BUILTIN, HIGH);
+ delay(1000);
+}
+
+
+///////////////////////////////////LEFT TURN /////////////////////////////////
+void leftT() { //turn left 90 degrees
+  readTrigAll();
+  analogWrite(PWMA, 200);
+  analogWrite(PWMB, 200); // motor speed
+  digitalWrite(AIN1, LOW); // Forward MOTOR 1 (right)
+  digitalWrite(AIN2, HIGH);
+  digitalWrite(BIN1, HIGH); // Backwards MOTOR 2
+  digitalWrite(BIN2, LOW); //
+  delay(5600); //5100
+  staystay();
+}
+
+//////////////////////////////////RIGHT TURN /////////////////////////////////////////
+void rightT() { // turn right 90 degrees
+  readTrigAll();
+  analogWrite(PWMA, 200);
+  analogWrite(PWMB, 200); // motor speed
+  digitalWrite(AIN1, HIGH); // Backwards MOTOR 1 (right)
+  digitalWrite(AIN2, LOW);
+  digitalWrite(BIN1, LOW); // Forward MOTOR 2
+  digitalWrite(BIN2, HIGH); //
+  delay(5600); //5100
+  staystay();
+}
+
+////////////////////////////////////UTURN///////////////////////////////////////////
+void uturn() { //turn around (flips 180, dir changes)
+  readTrigAll();
+  if(dir == 0) {
+	dir == 1;
+  }
+  else if (dir == 1) {
+	dir = 0;
+  }
+  analogWrite(PWMA, 200);
+  analogWrite(PWMB, 200); // motor speed
+  digitalWrite(AIN1, LOW); // Forward MOTOR 1 (right)
+  digitalWrite(AIN2, HIGH);
+  digitalWrite(BIN1, HIGH); // Backwards MOTOR 2
+  digitalWrite(BIN2, LOW); //
+  delay(10200); //5100
+  staystay();
+}
+
+///////////////////////////only the right wheel moves back///////////////////////////
+void backR() { //back up right wheel (HOME BASE ONLY)
+  analogWrite(PWMA, 150);
+  analogWrite(PWMB, 150); // motor speed
+  digitalWrite(LED_BUILTIN, HIGH);
+  digitalWrite(AIN1, LOW); // Backwards MOTOR 1 (right)
+  digitalWrite(AIN2, LOW);
+  digitalWrite(BIN1, LOW); // Forward MOTOR 2
+  digitalWrite(BIN2, HIGH); //
+}
+
+/////////////////only the left wheel moves back//////////////////////////////
+void backL() { //back up left wheel
+  analogWrite(PWMA, 150);
+  analogWrite(PWMB, 150); // motor speed
+  digitalWrite(LED_BUILTIN, HIGH);
+  digitalWrite(AIN1, LOW); // Forward MOTOR 1 (right)
+  digitalWrite(AIN2, HIGH);
+  digitalWrite(BIN1, LOW); // Backwards MOTOR 2
+  digitalWrite(BIN2, LOW); //
+}
+
+////////////////////////////////////////////////////BACKWARDS///////////////////////////////////////
+void back() { //drive backwards
+ analogWrite(PWMA, 255);
+ analogWrite(PWMB, 255);// motor speed
+ digitalWrite(LED_BUILTIN, HIGH);
+ digitalWrite(AIN1,LOW);// FORWARD MOTOR 1(right)
+ digitalWrite(AIN2,HIGH);// FORWARD MOTOR 1 (right)
+ digitalWrite(BIN1,LOW);// FORWARD MOTOR 2
+ digitalWrite(BIN2,HIGH);// FORWARD MOTOR 2
+}
+
+
+///////////////////////////////////for backing into home base/////////////////////
+void readRear() { //read rear sensors (HOME BASE ONLY)
+  for (int k = 0; k < 2; k++) {
+	//Serial.println("Test i");
+	digitalWrite(rearTrig[k], LOW);
+	delayMicroseconds(5);
+	digitalWrite(rearTrig[k], HIGH);
+	delayMicroseconds(10);
+	digitalWrite(rearTrig[k], LOW);
+	isWallThere[k] = digitalRead(rearObst[k]); //read the pin and store
+	durationRear[k] = pulseIn(rearObst[k], HIGH);
+	cmRear[k] = (durationRear[k] / 2) / 29.1; // Divide by 29.1
+	Serial.println(cmRear[k]);
+	delayMicroseconds(5);
+  }//end for
+}
+
+
+///////////////////////////////READ SENSORS////////////////////////////////
+void readTrig(int f) { //read a specific trig (called in multiple functions)
+  // for (int i = 0; i<6; i++)  {
+  //Serial.println("Test i");
+  digitalWrite(trigPin[f], LOW);
+  delayMicroseconds(5);
+  digitalWrite(trigPin[f], HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin[f], LOW);
+  isObstacleThere[f] = digitalRead(obstaclePin[f]); //read the pin and store
+  duration[f] = pulseIn(obstaclePin[f], HIGH);
+  readCM(f);
+  //}	 
+}
+
+void readCM(int g) { //gets centimeter value, called in readTrig()
+  //for (int k = 0; k<6; k++)  {
+  //Serial.println("test k");
+  cm[g] = (duration[g] / 2) / 29.1; // Divide by 29.1
+  Serial.println(cm[g]);
+  delayMicroseconds(5);
+  //}
+}
+
+
+/////////////////////////////////Method to run the encoder function/////////////////////////////////////////
+void encoder() {   //NOT USED
+//  newPosition = myEnc.read(); // reads intial postion left
+//  newPosition2 = myEnc2.read(); //reads intial postion right
+//  //Serial.print(newPosition);Serial.print(" ");Serial.println(newPosition2);
+//  if (newPosition != oldPosition && newPosition2 != oldPosition2) {
+//	oldPosition = newPosition;
+//	oldPosition2 = newPosition2;
+//  }
+//  return rotationsA = newPosition / 111; //divide by ticks of encoder- 11 ticks per rev;left motor
+//  return rotationsB = newPosition2 / 111; //11 ticks per rev//right motor
+}
+
+/////////////////////////////////////HOME BASE CODE BELOW  cmRear1 = LEFT and cmRear0= RIGHT////////////////////////
+void homeBase() { //will work when interrupt does not equal 0
+  Serial.println("Top of Home Base code");
+  serialReadRear();
+	int tune = 2;
+	if (cmRear[1] > 21 && cmRear[0] > 21) {
+      	Serial.println("A: More than 40");
+  //  	if (cmRear[1] > cmRear[0]) { //cm[0] on right and cm[1] on left
+  //    	backL();
+  //    	Serial.println("State A1");
+  //  	}
+  //  	else if (cmRear[1] < cmRear[0]) {
+  //    	backR();
+  //    	Serial.println("StateA2");
+  //  	}
+  //  	else if (cmRear[1] <= (cmRear[0] + 10) && cmRear[1] >= (cmRear[0] - 10)){
+  //    	back();
+  //    	Serial.println("State A3");
+  //  	}
+	back();
+ 	}
+ 	else if (cmRear[1] > 20 && cmRear[0] >20) {//cm[0] on back left and cm[1] on back right
+    	Serial.println("B: More Than 20");
+    	if (cmRear[1] > (cmRear[0]+3) ) {
+      	Serial.println("State B1");
+      	backR();
+    	}
+    	else if (cmRear[0] > (cmRear[1]+3) ) {
+      	backL();
+      	Serial.println("State B2");
+    	}
+  //  	else if (cmRear[1] <= (cmRear[0] + tune) && cmRear[1] >= (cmRear[0] - tune)) {
+  //    	back();
+  //    	Serial.println("State B3");
+  //  	}
+    	else{
+      	back();
+     	}
+ 	}
+    
+ 	else if (cmRear[1] > 15 && cmRear[1] < 20 && cmRear[0] > 15 && cmRear[0] < 20) {
+    	Serial.println("C: both are between 15 to 20");
+    	if (cmRear[1] > cmRear[0]) { //cm[0] on back left and cm[1] on back right
+      	backR();
+      	Serial.println("State C1");
+    	}
+    	else if (cmRear[1] < cmRear[0] ) {
+      	backL();
+      	Serial.println("State C2");
+    	}
+    	else if (cmRear[1] <= (cmRear[0] + tune) && cmRear[1] >= (cmRear[0] - tune) ) {
+        	back();
+        	Serial.println("State C3");
+    	}
+ 	}
+ 	 
+ 	else if (cmRear[1] <= 15 && cmRear[0] <= 15) {
+    	Serial.println("D: both are less than 15 - closer to goal");
+    	back();
+    	serialReadRear();
+    	if ( (cmRear[0] <= 11 && cmRear[0] >= 10) && (cmRear[1] <= 12 && cmRear[1] >= 10) ) {
+      	while (interrupt != 0) {
+        	Serial.println("State D1");
+        	staystay();
+        	serialReadRear();
+        	Check();
+      	}
+    	}
+ 	}
+ 	else {
+    	Serial.println("State D2");
+    	serialReadRear();
+ 	}
+  //}
+}
+
+
+void serialReadRear() { //read and print rear sensor values
+  readRear();
+  Serial.print("back rihgt: ");
+  Serial.println(cmRear[1]);
+  Serial.print("back left: ");
+  Serial.println(cmRear[0]);
+}
+
+
+////////////////////////////////////////////////RPI Serial input check///////////////////////////////////////
+void Check() { //check for rpi inputs
+  if (Serial.available()) { //checks if serial bit is avail
+	detect(Serial.read() - '0'); //calls detect method and compares serial number  	 
+  }
+
+}
+////////////////////////////////Instructions for various RPI inputs////////////////////////////////////
+void detect(int n) { //detect the serial in and give arduino commands
+  if (n == 1) {
+	staystay(); //execute stop method; //call your methods on these lines
+  } else if (n == 2) {
+	gogo(); //execute speedup method; //call your methods on these lines
+	delay(1000);
+	rightT();
+	interrupt = 0; //leave the home base
+  } else if (n == 3) {
+	uturn(); //execute turnaround method; //call your methods on these lines
+  } else if (n == 4) {
+	//somehow travel from location to home base, look for QR code??
+	interrupt = 2; //stay at home base
+	homeBase();
+	//home base go to
+  } else {
+	//do nothing;
+  }
+  //delay(500);
+}
+
+
+///////////////////////////////////////OBSTACLE DETECTION CODE/////////////////////////////////////////////
+
+void obst() { //obstacle detection code
+  if ((cm[1] < 25 || cm[2] < 25 || cm[3] < 25) && dir == 1) { //front
+	//Serial.print(avoid1);
+	Serial.println("MO");
+	staystay();
+	readTrigAll();
+	Serial.println(cm[1]);
+	Serial.println(cm[2]);
+	Serial.println(cm[3]);
+	Serial.println(cm[4]);
+	if (cm[4] > 60) { //front  //Count the number of encoder steps here and store into a variable
+  	//Serial.println("ML");
+  	x = cm[0];
+  	y = x + 5;
+  	//a=0;
+  	avoid1 = 1;
+  	Serial.println("First Left");
+  	leftT();
+  	delay(100);
+  	//readTrig(1);readTrig(2);readTrig(3);readTrig(0);
+  	Serial.println("First Left");
+	}
+	//Serial.println(cm[0]);Serial.println(cm[1]);Serial.println(cm[2]);Serial.println(cm[3]);Serial.println(cm[4]);
+	gogo();
+	delay(3000); //to match the 7000 delay for return
+	//myEnc.write(0);
+	//myEnc2.write(0);
+	encoder();
+	Serial.print(rotationsA);
+	Serial.print(" apple ");
+	Serial.println(rotationsB);
+	//gogo(); //E1 note the number of encoder steps
+	//delay(4000);
+	while (avoid1 == 1) {
+  	//Serial.print(avoid);
+  	readTrig(1);
+  	readTrig(2);
+  	readTrig(3);
+  	//a=0;
+  	gogo();
+  	Serial.println("Go avoid1 loop");
+  	delay(4000);
+  	readTrigAll();
+  	//delay(000);
+  	//Serial.println(cm[3]);
+  	while (a <= 2) {
+    	if (a > 2) {
+      	//Serial.println(a);
+      	avoid1 = 0;
+    	}
+    	//
+    	if (cm[0] > 60 && a < 2) {
+      	a = a + 1;
+      	//Serial.println(avoid);Serial.print("Turn R"); Serial.println(a);
+      	if (a < 1) {
+        	rightT();
+        	Serial.print("Right ");
+        	Serial.println(a);
+        	gogo();
+        	Serial.println("go while a loop");
+        	delay(7000);
+      	} else {
+        	rightT();
+        	Serial.print("Right ");
+        	Serial.println(a);
+        	gogo();
+        	Serial.println("go while a loop");
+        	delay(10);
+      	}
+
+      	if (cm[1] < 40 || cm[2] < 40 || cm[3] < 40) {
+        	leftT();
+        	gogo();
+        	if (cm[0] > 60) {
+          	a = a + 1;
+          	rightT();
+          	delay(100);
+        	} else {
+          	gogo();
+        	}
+      	}
+
+      	readTrigAll();
+      	//Serial.println(cm[0]);Serial.println(cm[1]);Serial.println(cm[2]);Serial.println(cm[3]);Serial.println(cm[4]);
+      	//Serial.println(cm[3]);
+
+      	Serial.print("a ");
+      	Serial.println(a);
+    	} else if (cm[0] <= 60 && a < 2) {
+        	Serial.println("Not passed obst yet. ");
+        	gogo();
+        	delay(10);
+        	staystay();
+        	readTrigAll();
+        	//Serial.println(cm[0]);Serial.println(cm[1]);Serial.println(cm[2]);Serial.println(cm[3]);Serial.println(cm[4]);
+        	//Serial.println(a);
+    	} else if (a == 2 && (cm[3] <= y || cm[1] <= y || cm[2] <= y)) { // || cm[0]>60 || encoder ;//HERE Recall variable - it will know to turn left based off the number of encoder steps
+        	Serial.print("Face forward again: ");
+        	Serial.print(cm[1]);
+        	Serial.print(" ");
+        	Serial.print(cm[2]);
+        	Serial.print(" ");
+        	Serial.println(cm[3]);
+        	Serial.print("y: ");
+        	Serial.println(y);
+        	leftT();
+        	Serial.println("Left");
+        	//a=0;
+        	//Serial.print(avoid);Serial.println("R2Go");
+        	//gogo(); //once you go back the same amount of steps as E1, turn left
+        	//delay(2000);
+        	////staystay();
+ 
+        	a = 3;
+    	} else {
+        	Serial.println("else - waiting till something tells it to turn");
+        	staystay();
+        	Serial.print("y: ");
+        	Serial.print(y);
+        	Serial.print("  	a: ");
+        	Serial.println(a);
+        	readTrigAll();
+        	Serial.print("cm[0]: ");
+        	Serial.println(cm[0]);
+        	Serial.println(cm[1]);
+        	Serial.println(cm[2]);
+        	Serial.println(cm[3]);
+        	gogo();
+        	delay(2000);
+    	}
+  	}
+  	readTrigAll();
+  	avoid1 = 0;
+  	Serial.print("Sensor Dist: ");
+  	Serial.println(y);
+  	Serial.println(cm[0]);
+  	Serial.println(cm[1]);
+  	Serial.println(cm[2]);
+  	Serial.println(cm[3]);
+  	Serial.println(cm[4]);
+	}
+	Serial.print("Avoid should be 0 = ");
+	Serial.println(avoid1);
+  }
+  //DIR = 0 BACK
+  else if ((cm[4] < 50 || cm[1] < 50) && dir == 0) { //front
+	// Serial.print(avoid);Serial.println("MO");
+	staystay();
+	readTrigAll();
+	if (cm[3] > 40) { //front
+  	// Serial.print(avoid);Serial.println("ML");
+  	avoid2 = 1;
+  	rightT();
+  	readTrigAll();
+  	gogo(); //E1 note the number of encoder steps
+  	while (avoid2 = 1) {
+    	int x = cm[0];
+    	// Serial.print(avoid);Serial.println("Go");
+    	readTrigAll();
+    	gogo();
+    	//delay(1000);
+    	if (cm[5] > 40) {
+      	//   Serial.print(avoid);Serial.println("R1");
+      	leftT();
+      	gogo();
+      	delay(7000);
+      	staystay();
+      	readTrigAll();
+    	}
+    	if (cm[5] > 40) {
+      	leftT();
+      	//   Serial.print(avoid);Serial.println("R2Go");
+      	gogo(); //once you go back the same amount of steps as E1, turn right
+      	delay(7000);
+      	staystay();
+      	readTrigAll();
+
+    	}
+    	if (cm[3] > 40 && cm[4] < (x + 5)) { //once it sees the wall at a certain distance, turn
+      	//   Serial.print(avoid);Serial.println("L1");
+      	rightT();
+      	readTrigAll();
+      	avoid2 = 0; //breaks out of while
+    	}
+  	} // while end
+	} //if blocked right end
+	else if (cm[5] > 40) { //front
+  	//Serial.print(avoid);Serial.println("MR");
+  	leftT();
+  	readTrigAll();
+	} //if blocked left end
+	else if ((cm[3] < 40) && (cm[3] < 40)) {
+  	//Serial.print(avoid);Serial.println("MU");
+  	dir = 1;
+  	uturn();
+	} //end uturn
+	else {
+  	//Serial.print(avoid);Serial.println("MOS?");
+  	staystay();
+	} //end stay else
+  } //else if blocked front end
+  else {
+	//Serial.print(avoid);Serial.println("MS?");
+	staystay();
+  }
+}
+
+
+///////////////////////////////////////////////////READ ALL TRIG//////////////////////////////////////////
+void readTrigAll() {
+  readTrig(1);
+  readTrig(2);
+  readTrig(3);
+  readTrig(4);
+  readTrig(0);
+  readCM();
+}
+
+///////////////////////////////////////////////////READ ALL CM//////////////////////////////////////////
+void readCM() {
+  readCM(1);
+  readCM(2);
+  readCM(3);
+  readCM(4);
+  readCM(0);
+}
